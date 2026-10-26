@@ -1,53 +1,74 @@
-import sublime
-import sublime_plugin
-import subprocess
-import re
+#!/usr/bin/env python3
+import sys
+import os
+import json
+import smtplib
+from datetime import datetime
+from email.mime.text import MIMEText
+from email.header import Header
 
-class SendDiaryCommand(sublime_plugin.TextCommand):
-    def run(self, edit):
-        view = self.view
-        
-        if not view.file_name():
-            sublime.error_message("请先保存当前日记文件！")
-            return
+CONFIG_PATH = os.path.expanduser("~/.config/diary/config.json")
 
-        # 1. 自动保存当前文件
-        view.run_command("save")
-        win_path = view.file_name()
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        print(f"错误: 找不到配置文件 {CONFIG_PATH}，请先运行 install.sh")
+        sys.exit(1)
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-        # 2. Windows 路径转 WSL 路径
-        wsl_path = win_path.replace('\\', '/')
-        wsl_path = re.sub(r'^([A-Za-z]):/', lambda m: f"/mnt/{m.group(1).lower()}/", wsl_path)
+def send_and_delete(file_path):
+    config = load_config()
+    
+    if not os.path.exists(file_path):
+        print(f"错误: 文件不存在 {file_path}")
+        sys.exit(1)
 
-        sublime.status_message("正在通过 WSL (Conda: diary_env) 发送日记...")
+    # 1. 读取日记内容
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"读取文件失败: {e}")
+        sys.exit(1)
 
-        # 3. 组装 WSL 执行命令 (核心修复点)
-        # 显式寻找并 source conda.sh，解决非交互式 shell 找不到 conda 的问题
-        wsl_script_cmd = (
-            "if [ -f ~/miniconda3/etc/profile.d/conda.sh ]; then source ~/miniconda3/etc/profile.d/conda.sh; "
-            "elif [ -f ~/anaconda3/etc/profile.d/conda.sh ]; then source ~/anaconda3/etc/profile.d/conda.sh; "
-            "elif [ -f ~/miniforge3/etc/profile.d/conda.sh ]; then source ~/miniforge3/etc/profile.d/conda.sh; "
-            "else echo 'Error: 找不到 Conda 初始化脚本！' >&2; exit 1; fi && "
-            "conda activate diary_env && "
-            f"python ~/.local/bin/send_diary.py \"{wsl_path}\" ; "
-            "conda deactivate"
-        )
-        
-        try:
-            # 调用 WSL 执行
-            res = subprocess.run(
-                ["wsl.exe", "bash", "-c", wsl_script_cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+    # --- 新增：读取配置并附加落款 ---
+    signature = config.get("signature", "")
+    if signature:
+        content += f"\n\n{signature}"
+    # --------------------------------
 
-            if res.returncode == 0:
-                sublime.message_dialog("日记已成功发送，本地文件已删除！\n(Conda 环境已自动恢复)")
-                view.set_scratch(True)
-                view.close()
-            else:
-                sublime.error_message(f"发送失败！\n\n错误信息：\n{res.stderr or res.stdout}")
+    # 2. 组装邮件
+    today_str = datetime.now().strftime("%Y/%m/%d")
+    subject = f"{today_str} diary"
 
-        except Exception as e:
-            sublime.error_message(f"执行脚本发生异常: {str(e)}")
+    msg = MIMEText(content, "plain", "utf-8")
+    # --- 修改：只对昵称 "Diary" 编码，邮箱地址用尖括号原样拼接 ---
+    msg["From"] = f"{Header('myself', 'utf-8')} <{config['sender']}>"
+    # --- 修改：收件人纯邮箱地址不需要 Header 编码，直接赋值 ---
+    msg["To"] = config["receiver"]
+    msg["Subject"] = Header(subject, "utf-8")
+
+
+    # 3. 发送邮件
+    try:
+        server = smtplib.SMTP_SSL(config["smtp_server"], config.get("smtp_port", 465))
+        server.login(config["sender"], config["auth_code"])
+        server.sendmail(config["sender"], [config["receiver"]], msg.as_string())
+        server.quit()
+        print(">>> 邮件发送成功！")
+    except Exception as e:
+        print(f">>> 发送邮件失败: {e}")
+        sys.exit(1) # 失败则退出，不执行删除
+
+    # 4. 成功后删除文件
+    try:
+        os.remove(file_path)
+        print(f">>> 本地文件已自动清理: {file_path}")
+    except Exception as e:
+        print(f">>> 删除文件失败: {e}")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("用法: python3 send_diary.py <日记文件路径>")
+        sys.exit(1)
+    send_and_delete(sys.argv[1])

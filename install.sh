@@ -70,6 +70,8 @@ if [ -z "$CONFIG_EXISTS" ]; then
     echo ""
     read -p "请输入 SMTP 服务器 [默认: smtp.163.com]: " SMTP_SERVER
     SMTP_SERVER=${SMTP_SERVER:-smtp.163.com}
+    # --- 新增：提示输入自定义落款 ---
+    read -p "请输入邮件末尾的自定义落款 (如: -- 来自我的Win10): " SIGNATURE
 
     cat > "$CONFIG_FILE" <<EOF
 {
@@ -77,9 +79,11 @@ if [ -z "$CONFIG_EXISTS" ]; then
   "receiver": "$RECEIVER",
   "auth_code": "$AUTH_CODE",
   "smtp_server": "$SMTP_SERVER",
-  "smtp_port": 465
+  "smtp_port": 465,
+  "signature": "$SIGNATURE"
 }
 EOF
+
     chmod 600 "$CONFIG_FILE"
     echo ">> 配置文件已生成至: $CONFIG_FILE"
 fi
